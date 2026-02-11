@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
-import 'osm_page.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'driver_online_page.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
   runApp(const MyApp());
 }
 
@@ -12,7 +15,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return const MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: OsmPage(),
+      home: DriverOnlinePage(),
     );
   }
 }
