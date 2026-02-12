@@ -4,8 +4,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class RouteMapOsmPage extends StatefulWidget {
-  const RouteMapOsmPage({super.key});
-
+  final String routeId;
+  const RouteMapOsmPage({super.key, required this.routeId});
   @override
   State<RouteMapOsmPage> createState() => _RouteMapOsmPageState();
 }
@@ -15,7 +15,7 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
 
   // ✅ نفس الداتا بتاعتك
   final String collection = "routes";
-  final String docId = "lwjHhq3HivJsA4asK4iY";
+  String get docId => widget.routeId;
 
   List<LatLng> routePoints = [];
   LatLng? start;
