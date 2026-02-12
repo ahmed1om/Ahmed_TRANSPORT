@@ -5,8 +5,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geolocator/geolocator.dart';
 
 class DriverOnlinePage extends StatefulWidget {
-  const DriverOnlinePage({super.key});
+  final String routeId;
 
+  const DriverOnlinePage({super.key, required this.routeId});
   @override
   State<DriverOnlinePage> createState() => _DriverOnlinePageState();
 }
@@ -56,6 +57,7 @@ class _DriverOnlinePageState extends State<DriverOnlinePage> {
         .doc(user.uid)
         .set({
           'driverId': user.uid,
+          'routeId': widget.routeId,
           'lat': pos.latitude,
           'lng': pos.longitude,
           'isOnline': true,
