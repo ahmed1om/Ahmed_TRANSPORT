@@ -1,3 +1,10 @@
+// RoutesListPage (للراكب)
+
+// تجيب المسارات من routes
+
+// تعرضها List
+
+// لما تضغط على مسار → تمشي صفحة الخريطة RouteMapOsmPage لعرض المسار + السيارات (السواقين).
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'route_map_osm_page.dart';
@@ -10,21 +17,16 @@ class RoutesListPage extends StatelessWidget {
     final routesRef = FirebaseFirestore.instance.collection('routes');
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Routes')),
+      appBar: AppBar(title: const Text('اختر مسار')),
       body: StreamBuilder<QuerySnapshot>(
         stream: routesRef.orderBy('createdAt', descending: true).snapshots(),
         builder: (context, snap) {
-          if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
-          }
-          if (!snap.hasData) {
+          if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
+          if (!snap.hasData)
             return const Center(child: CircularProgressIndicator());
-          }
 
           final docs = snap.data!.docs;
-          if (docs.isEmpty) {
-            return const Center(child: Text('No routes yet'));
-          }
+          if (docs.isEmpty) return const Center(child: Text('No routes yet'));
 
           return ListView.separated(
             itemCount: docs.length,
@@ -35,12 +37,11 @@ class RoutesListPage extends StatelessWidget {
 
               final name = (data['name'] ?? 'Route') as String;
               final price = data['price'] ?? 0;
-              final active = data['active'] == true;
 
               return ListTile(
                 title: Text(name),
-                subtitle: Text('Price: $price • Active: $active'),
-                trailing: const Icon(Icons.map),
+                subtitle: Text('Price: $price'),
+                trailing: const Icon(Icons.directions_car),
                 onTap: () {
                   Navigator.push(
                     context,
