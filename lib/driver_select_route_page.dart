@@ -60,7 +60,7 @@ class _DriverSelectRoutePageState extends State<DriverSelectRoutePage> {
                 }
 
                 return DropdownButtonFormField<String>(
-                  value: currentExists ? _selectedRouteId : null,
+                  initialValue: currentExists ? _selectedRouteId : null,
                   decoration: const InputDecoration(
                     border: OutlineInputBorder(),
                     labelText: 'Route',
@@ -112,8 +112,10 @@ class _DriverSelectRoutePageState extends State<DriverSelectRoutePage> {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) =>
-                                DriverOnlinePage(routeId: _selectedRouteId!),
+                            builder: (_) => DriverOnlinePage(
+                              routeId: _selectedRouteId!,
+                              routeName: _selectedRouteName,
+                            ),
                           ),
                         );
                       },

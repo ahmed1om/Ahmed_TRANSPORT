@@ -22,15 +22,16 @@ class RoutesListPage extends StatelessWidget {
         stream: routesRef.orderBy('createdAt', descending: true).snapshots(),
         builder: (context, snap) {
           if (snap.hasError) return Center(child: Text('Error: ${snap.error}'));
-          if (!snap.hasData)
+          if (!snap.hasData) {
             return const Center(child: CircularProgressIndicator());
+          }
 
           final docs = snap.data!.docs;
           if (docs.isEmpty) return const Center(child: Text('No routes yet'));
 
           return ListView.separated(
             itemCount: docs.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
+            separatorBuilder: (_, _) => const Divider(height: 1),
             itemBuilder: (context, i) {
               final doc = docs[i];
               final data = doc.data() as Map<String, dynamic>;
