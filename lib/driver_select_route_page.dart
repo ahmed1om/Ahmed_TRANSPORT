@@ -68,11 +68,10 @@ class _DriverSelectRoutePageState extends State<DriverSelectRoutePage> {
                   items: docs.map((d) {
                     final data = d.data() as Map<String, dynamic>;
                     final name = (data['name'] ?? 'Route') as String;
-                    final price = data['price'] ?? 0;
 
                     return DropdownMenuItem<String>(
                       value: d.id,
-                      child: Text('$name (السعر: $price)'),
+                      child: Text(name),
                       onTap: () {
                         // ✅ نحفظ الاسم لحظة اختيار العنصر
                         _selectedRouteName = name;

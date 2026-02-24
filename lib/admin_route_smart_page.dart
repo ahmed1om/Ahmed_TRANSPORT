@@ -5,6 +5,8 @@ import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import 'admin_pricing_page.dart'; // ✅ صفحة التسعير (perKm/baseFare)
+
 class AdminRouteSmartPage extends StatefulWidget {
   const AdminRouteSmartPage({super.key});
 
@@ -14,7 +16,6 @@ class AdminRouteSmartPage extends StatefulWidget {
 
 class _AdminRouteSmartPageState extends State<AdminRouteSmartPage> {
   final _nameCtrl = TextEditingController();
-  final _priceCtrl = TextEditingController(text: "0");
 
   LatLng? _start;
   LatLng? _end;
@@ -34,7 +35,7 @@ class _AdminRouteSmartPageState extends State<AdminRouteSmartPage> {
         _end = latlng;
         _status = 'End set ✅ (اضغط Generate Route)';
       } else {
-        // إذا الأدمن ضغط مرة ثالثة: نبدأ من جديد (أسهل وأوضح)
+        // إذا ضغط مرة ثالثة: نبدأ من جديد
         _start = latlng;
         _end = null;
         _routePoints.clear();
@@ -103,18 +104,19 @@ class _AdminRouteSmartPageState extends State<AdminRouteSmartPage> {
 
   Future<void> _saveRoute() async {
     final name = _nameCtrl.text.trim();
-    final priceText = _priceCtrl.text.trim();
 
     if (name.isEmpty) {
       setState(() => _status = 'اكتب اسم المسار');
+      return;
+    }
+    if (_start == null || _end == null) {
+      setState(() => _status = 'حدد Start و End أولاً');
       return;
     }
     if (_routePoints.length < 2) {
       setState(() => _status = 'اعمل Generate Route أولاً');
       return;
     }
-
-    final price = int.tryParse(priceText) ?? 0;
 
     setState(() {
       _saving = true;
@@ -128,7 +130,6 @@ class _AdminRouteSmartPageState extends State<AdminRouteSmartPage> {
 
       await FirebaseFirestore.instance.collection('routes').add({
         'name': name,
-        'price': price,
         'active': true,
         'mode': 'driving',
         'start': GeoPoint(_start!.latitude, _start!.longitude),
@@ -165,7 +166,6 @@ class _AdminRouteSmartPageState extends State<AdminRouteSmartPage> {
   @override
   void dispose() {
     _nameCtrl.dispose();
-    _priceCtrl.dispose();
     super.dispose();
   }
 
@@ -195,7 +195,21 @@ class _AdminRouteSmartPageState extends State<AdminRouteSmartPage> {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Admin - Smart Route (OSRM)')),
+      appBar: AppBar(
+        title: const Text('Admin - Smart Route (OSRM)'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.attach_money),
+            tooltip: 'Pricing (perKm/baseFare)',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const AdminPricingPage()),
+              );
+            },
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
@@ -210,15 +224,7 @@ class _AdminRouteSmartPageState extends State<AdminRouteSmartPage> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                TextField(
-                  controller: _priceCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'السعر',
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 8),
+
                 Row(
                   children: [
                     Expanded(

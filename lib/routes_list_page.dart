@@ -11,7 +11,6 @@ import 'route_map_osm_page.dart';
 
 class RoutesListPage extends StatelessWidget {
   const RoutesListPage({super.key});
-
   @override
   Widget build(BuildContext context) {
     final routesRef = FirebaseFirestore.instance.collection('routes');
@@ -37,11 +36,10 @@ class RoutesListPage extends StatelessWidget {
               final data = doc.data() as Map<String, dynamic>;
 
               final name = (data['name'] ?? 'Route') as String;
-              final price = data['price'] ?? 0;
 
               return ListTile(
                 title: Text(name),
-                subtitle: Text('Price: $price'),
+                subtitle: const Text('السعر حسب المسافة (perKm)'),
                 trailing: const Icon(Icons.directions_car),
                 onTap: () {
                   Navigator.push(
