@@ -1,14 +1,15 @@
-// RouteMapOsmPage (للراكب)
+// هذا الملف هو لصفحة الراكب بيعرض الخرطة والمسار
+//  الفرق بينو انو بيعتمد النقطة بتاعت بداية الرحلة حقت الراكب
+//  GPS بالـ
+//  بناء على موقعه الحالي، وبيحدد نقطة البداية دي
+//   تلقائياً، وبيحسب المسافة والتكلفة بناءً على المسار المخزن في Firestore. كمان بيعرض السواقين المتصلين على نفس المسار.
 
-// تقرأ routes/{routeId} وتعرض polyline
-
-// وتقرأ driver_locations وتعرض السيارات المرتبطة بنفس routeId.
-//  بالكيلومترلقد عدلت ت هذه الصحة للراكب لتعرض سعر التكلفةة
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 class RouteMapOsmPage extends StatefulWidget {
@@ -26,27 +27,33 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
   final String routesCollection = "routes";
   final String driversCollection = "driver_locations";
 
+  // Route
   List<LatLng> routePoints = [];
-  LatLng? start;
-  LatLng? end;
+  List<LatLng> segmentPoints = []; // ✅ الجزء المحدد من المسار
+  LatLng? routeStart;
+  LatLng? routeEnd;
 
   bool loading = true;
   String? error;
 
-  // drivers
+  // Drivers on same route
   List<LatLng> driverPoints = [];
-  StreamSubscription<QuerySnapshot>? _driversSub;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _driversSub;
 
-  // pricing
+  // Pricing (global)
   double perKm = 0;
   double baseFare = 0;
-  StreamSubscription<DocumentSnapshot>? _pricingSub;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _pricingSub;
 
-  // passenger selection
-  LatLng? pickup;
-  LatLng? dropoff;
+  // Passenger selection
+  LatLng? pickup; // start
+  LatLng? dropoff; // end
+  bool pickingPickup = false; // لو true: الضغطة الجاية تعيّن pickup
   double? tripKm;
   double? tripCost;
+
+  // GPS status message
+  String? gpsStatus;
 
   @override
   void initState() {
@@ -61,6 +68,7 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
     super.dispose();
   }
 
+  // ---------------- Load Route ----------------
   Future<void> _loadRouteThenListen() async {
     try {
       final snap = await FirebaseFirestore.instance
@@ -76,7 +84,7 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
         return;
       }
 
-      final data = snap.data()!;
+      final data = snap.data() as Map<String, dynamic>;
       final List points = (data['points'] ?? []) as List;
 
       final pts = points.map((p) {
@@ -105,15 +113,20 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
 
       setState(() {
         routePoints = pts;
-        start = s;
-        end = e;
+        routeStart = s;
+        routeEnd = e;
         loading = false;
       });
 
-      WidgetsBinding.instance.addPostFrameCallback((_) => _fitBounds());
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _fitBounds(routePoints);
+      });
 
       _listenDrivers();
       _listenPricing();
+
+      // ✅ pickup تلقائي من GPS
+      await _setPickupFromGPS();
     } catch (e) {
       setState(() {
         error = "فشل تحميل المسار: $e";
@@ -122,27 +135,30 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
     }
   }
 
-  // ---------- pricing ----------
+  // ---------------- Pricing ----------------
   void _listenPricing() {
     _pricingSub?.cancel();
+
     final ref = FirebaseFirestore.instance
         .collection('settings')
         .doc('pricing');
 
     _pricingSub = ref.snapshots().listen((doc) {
-      // ignore: unnecessary_cast
-      final data = doc.data() as Map<String, dynamic>? ?? {};
-      perKm = (data['perKm'] as num?)?.toDouble() ?? 0;
-      baseFare = (data['baseFare'] as num?)?.toDouble() ?? 0;
+      final data = doc.data() ?? <String, dynamic>{};
+      final newPerKm = (data['perKm'] as num?)?.toDouble() ?? 0;
+      final newBase = (data['baseFare'] as num?)?.toDouble() ?? 0;
 
-      if (mounted) {
-        setState(() {});
-        _recalcFare();
-      }
+      if (!mounted) return;
+      setState(() {
+        perKm = newPerKm;
+        baseFare = newBase;
+      });
+
+      _recalcFare();
     });
   }
 
-  // ---------- drivers ----------
+  // ---------------- Drivers ----------------
   void _listenDrivers() {
     _driversSub?.cancel();
 
@@ -156,8 +172,7 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
       final pts = <LatLng>[];
 
       for (final doc in snap.docs) {
-        // ignore: unnecessary_cast
-        final data = doc.data() as Map<String, dynamic>;
+        final data = doc.data();
         final lat = data['lat'];
         final lng = data['lng'];
         if (lat == null || lng == null) continue;
@@ -170,7 +185,67 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
     });
   }
 
-  // ---------- passenger distance on route ----------
+  // ---------------- GPS Pickup ----------------
+  Future<void> _setPickupFromGPS() async {
+    try {
+      if (!mounted) return;
+      setState(() => gpsStatus = "جارٍ تحديد موقعك...");
+
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (!mounted) return;
+        setState(() => gpsStatus = "شغّل GPS (Location) من الجهاز");
+        return;
+      }
+
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+
+      if (perm == LocationPermission.denied) {
+        if (!mounted) return;
+        setState(() => gpsStatus = "تم رفض صلاحية الموقع");
+        return;
+      }
+
+      if (perm == LocationPermission.deniedForever) {
+        if (!mounted) return;
+        setState(
+          () => gpsStatus = "فعّل الصلاحية من Settings (Denied Forever)",
+        );
+        return;
+      }
+
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 12),
+        ),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        pickup = LatLng(pos.latitude, pos.longitude);
+        gpsStatus = null;
+        // ما نمسح dropoff تلقائياً هنا (إلا لو داير)
+        segmentPoints = [];
+        tripKm = null;
+        tripCost = null;
+      });
+
+      // لو في dropoff موجودة، أعد الحساب
+      _recalcFare();
+
+      // زوم خفيف على موقع الراكب
+      mapController.move(pickup!, 16);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => gpsStatus = "فشل تحديد الموقع: $e");
+    }
+  }
+
+  // ---------------- Route Distance + Segment ----------------
   int _nearestIndex(LatLng p) {
     int bestIdx = 0;
     double best = double.infinity;
@@ -193,9 +268,9 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
 
     int from = ia, to = ib;
     if (from > to) {
-      final tmp = from;
+      final t = from;
       from = to;
-      to = tmp;
+      to = t;
     }
 
     double meters = 0;
@@ -205,54 +280,99 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
     return meters / 1000.0;
   }
 
+  void _buildSegmentAndZoom() {
+    if (pickup == null || dropoff == null) return;
+    if (routePoints.length < 2) return;
+
+    int a = _nearestIndex(pickup!);
+    int b = _nearestIndex(dropoff!);
+
+    int from = a, to = b;
+    if (from > to) {
+      final t = from;
+      from = to;
+      to = t;
+    }
+
+    final seg = routePoints.sublist(from, to + 1);
+
+    setState(() => segmentPoints = seg);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _fitBounds(seg, padding: 60);
+    });
+  }
+
   void _recalcFare() {
     if (pickup == null || dropoff == null) return;
+
     final km = _distanceOnRouteKm(pickup!, dropoff!);
     final cost = baseFare + (km * perKm);
 
+    if (!mounted) return;
     setState(() {
       tripKm = km;
       tripCost = cost;
     });
+
+    _buildSegmentAndZoom();
   }
 
+  // ---------------- Map Tap Logic ----------------
   void _onMapTap(LatLng p) {
-    // أول ضغطة: pickup
+    // لو المستخدم اختار تغيير البداية
+    if (pickingPickup) {
+      setState(() {
+        pickup = p;
+        pickingPickup = false;
+        // نعيد حساب/Segment لو في dropoff
+        segmentPoints = [];
+        tripKm = null;
+        tripCost = null;
+      });
+      _recalcFare();
+      return;
+    }
+
+    // لو pickup ما اتحدد (مثلاً GPS فشل)
     if (pickup == null) {
       setState(() {
         pickup = p;
         dropoff = null;
+        segmentPoints = [];
         tripKm = null;
         tripCost = null;
       });
       return;
     }
 
-    // ثاني ضغطة: dropoff
+    // أول تحديد للنهاية
     if (dropoff == null) {
       setState(() => dropoff = p);
       _recalcFare();
       return;
     }
 
-    // ثالث ضغطة: reset واعتبرها pickup جديد
+    // تغيير النهاية (بدون reset كامل)
     setState(() {
-      pickup = p;
-      dropoff = null;
+      dropoff = p;
+      segmentPoints = [];
       tripKm = null;
       tripCost = null;
     });
+    _recalcFare();
   }
 
-  void _fitBounds() {
-    if (routePoints.isEmpty) return;
+  // ---------------- Fit Bounds ----------------
+  void _fitBounds(List<LatLng> pts, {double padding = 40}) {
+    if (pts.isEmpty) return;
 
-    double minLat = routePoints.first.latitude;
-    double maxLat = routePoints.first.latitude;
-    double minLng = routePoints.first.longitude;
-    double maxLng = routePoints.first.longitude;
+    double minLat = pts.first.latitude;
+    double maxLat = pts.first.latitude;
+    double minLng = pts.first.longitude;
+    double maxLng = pts.first.longitude;
 
-    for (final p in routePoints) {
+    for (final p in pts) {
       if (p.latitude < minLat) minLat = p.latitude;
       if (p.latitude > maxLat) maxLat = p.latitude;
       if (p.longitude < minLng) minLng = p.longitude;
@@ -261,8 +381,18 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
 
     final bounds = LatLngBounds(LatLng(minLat, minLng), LatLng(maxLat, maxLng));
     mapController.fitCamera(
-      CameraFit.bounds(bounds: bounds, padding: const EdgeInsets.all(40)),
+      CameraFit.bounds(bounds: bounds, padding: EdgeInsets.all(padding)),
     );
+  }
+
+  void _resetAll() {
+    setState(() {
+      dropoff = null;
+      tripKm = null;
+      tripCost = null;
+      segmentPoints = [];
+      pickingPickup = false;
+    });
   }
 
   @override
@@ -277,10 +407,10 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
       );
     }
 
-    final center = start ?? routePoints.first;
+    final center = routeStart ?? routePoints.first;
 
-    // info text
-    String info = "اضغط على الخريطة لتحديد نقطة البداية ثم النهاية";
+    String info = "حدد نقطة النهاية من الخريطة";
+    if (pickup == null) info = "حدد البداية أو اضغط (موقعي)";
     if (pickup != null && dropoff == null) info = "حدد نقطة النهاية";
     if (pickup != null && dropoff != null) {
       info =
@@ -293,18 +423,25 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.center_focus_strong),
-            onPressed: _fitBounds,
+            onPressed: () => _fitBounds(routePoints),
+            tooltip: "Fit full route",
+          ),
+          IconButton(
+            icon: const Icon(Icons.zoom_in_map),
+            onPressed: segmentPoints.length >= 2
+                ? () => _fitBounds(segmentPoints, padding: 60)
+                : null,
+            tooltip: "Fit selected segment",
+          ),
+          IconButton(
+            icon: const Icon(Icons.my_location),
+            onPressed: _setPickupFromGPS,
+            tooltip: "موقعي كبداية",
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: () {
-              setState(() {
-                pickup = null;
-                dropoff = null;
-                tripKm = null;
-                tripCost = null;
-              });
-            },
+            onPressed: _resetAll,
+            tooltip: "Reset end",
           ),
         ],
       ),
@@ -323,8 +460,21 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
                 userAgentPackageName: "com.example.project1",
               ),
 
+              // ✅ المسار كامل + segment (مختلف اللون)
               PolylineLayer(
-                polylines: [Polyline(points: routePoints, strokeWidth: 5)],
+                polylines: [
+                  Polyline(
+                    points: routePoints,
+                    strokeWidth: 5,
+                    color: Colors.blue,
+                  ),
+                  if (segmentPoints.length >= 2)
+                    Polyline(
+                      points: segmentPoints,
+                      strokeWidth: 9,
+                      color: Colors.red,
+                    ),
+                ],
               ),
 
               MarkerLayer(
@@ -340,16 +490,16 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
                   ),
 
                   // Route start/end
-                  if (start != null)
+                  if (routeStart != null)
                     Marker(
-                      point: start!,
+                      point: routeStart!,
                       width: 40,
                       height: 40,
                       child: const Icon(Icons.play_arrow, size: 36),
                     ),
-                  if (end != null)
+                  if (routeEnd != null)
                     Marker(
-                      point: end!,
+                      point: routeEnd!,
                       width: 40,
                       height: 40,
                       child: const Icon(Icons.flag, size: 30),
@@ -383,7 +533,7 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.92),
+                color: Colors.white.withOpacity(0.92),
                 borderRadius: BorderRadius.circular(14),
               ),
               child: Column(
@@ -395,11 +545,45 @@ class _RouteMapOsmPageState extends State<RouteMapOsmPage> {
                   ),
                   const SizedBox(height: 6),
                   Text("perKm=$perKm • baseFare=$baseFare"),
+                  if (gpsStatus != null) ...[
+                    const SizedBox(height: 6),
+                    Text(gpsStatus!, style: const TextStyle(color: Colors.red)),
+                  ],
                 ],
               ),
             ),
           ),
         ],
+      ),
+
+      // زر تغيير البداية (يدوي) + زر موقعي
+      bottomNavigationBar: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                icon: Icon(
+                  pickingPickup ? Icons.check : Icons.edit_location_alt,
+                ),
+                label: Text(
+                  pickingPickup ? "اضغط بالخريطة للبداية" : "تغيير البداية",
+                ),
+                onPressed: () {
+                  setState(() => pickingPickup = !pickingPickup);
+                },
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.my_location),
+                label: const Text("موقعي"),
+                onPressed: _setPickupFromGPS,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
