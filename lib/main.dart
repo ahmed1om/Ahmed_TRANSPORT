@@ -3,7 +3,6 @@ import 'package:firebase_core/firebase_core.dart';
 
 import 'admin_route_smart_page.dart';
 import 'driver_select_route_page.dart';
-// import 'routes_list_page.dart';
 import 'passenger_shell_page.dart';
 
 Future<void> main() async {

@@ -7,6 +7,8 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
+import 'wallet_service.dart';
+
 class PassengerJourneyPage extends StatefulWidget {
   final ValueNotifier<String?> selectedRouteId;
   const PassengerJourneyPage({super.key, required this.selectedRouteId});
@@ -48,9 +50,18 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
 
   // Trip state
   String? activeTripId;
+  String tripStage =
+      'none'; // none / waiting_driver / boarded_pending_payment / in_trip / canceled
   String tripStatusText = 'لم يتم تأكيد رحلة بعد';
+
+  // Passenger broadcast
   Timer? _passengerTimer;
   bool broadcasting = false;
+
+  // Boarding prompt
+  bool boardingPromptShown = false;
+  DateTime? lastBoardingPromptAt;
+  static const double arrivalMeters = 250;
 
   @override
   void initState() {
@@ -101,10 +112,7 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
 
   // ---------------- Load Route ----------------
   Future<void> _loadRoute(String id) async {
-    // نلغي أي بث/رحلة قديمة عند تغيير المسار
     await _stopPassengerBroadcast();
-    activeTripId = null;
-    tripStatusText = 'لم يتم تأكيد رحلة بعد';
 
     setState(() {
       routeId = id;
@@ -123,6 +131,13 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
       tripKm = null;
       tripCost = null;
       pickingPickup = false;
+
+      // trip reset
+      activeTripId = null;
+      tripStage = 'none';
+      tripStatusText = 'لم يتم تأكيد رحلة بعد';
+      boardingPromptShown = false;
+      lastBoardingPromptAt = null;
     });
 
     try {
@@ -204,6 +219,8 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
           }
           if (!mounted) return;
           setState(() => driverPoints = pts);
+
+          _maybePromptBoarding();
         });
   }
 
@@ -314,7 +331,7 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
         tripKm = null;
         tripCost = null;
       });
-      _recalcFare();
+      if (dropoff != null) _recalcFare();
       return;
     }
 
@@ -335,7 +352,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
       return;
     }
 
-    // تغيير النهاية بسرعة
     setState(() {
       dropoff = snapped;
       segmentPoints = [];
@@ -359,13 +375,11 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
     if (!enabled) return null;
 
     LocationPermission perm = await Geolocator.checkPermission();
-    if (perm == LocationPermission.denied) {
+    if (perm == LocationPermission.denied)
       perm = await Geolocator.requestPermission();
-    }
     if (perm == LocationPermission.denied ||
-        perm == LocationPermission.deniedForever) {
+        perm == LocationPermission.deniedForever)
       return null;
-    }
 
     final pos = await Geolocator.getCurrentPosition(
       locationSettings: const LocationSettings(
@@ -440,6 +454,7 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
     }
 
     final uid = await _ensureSignedIn();
+    await WalletService.ensureWallet(uid);
 
     final ref = await FirebaseFirestore.instance
         .collection('trip_requests')
@@ -454,13 +469,17 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
           'perKm': perKm,
           'baseFare': baseFare,
           'status': 'waiting_driver',
+          'paymentStatus': 'unpaid',
           'createdAt': FieldValue.serverTimestamp(),
         });
 
     if (!mounted) return;
     setState(() {
       activeTripId = ref.id;
+      tripStage = 'waiting_driver';
       tripStatusText = 'في انتظار السائق ليصلك';
+      boardingPromptShown = false;
+      lastBoardingPromptAt = null;
     });
 
     _startPassengerBroadcast(uid: uid, tripId: ref.id);
@@ -482,10 +501,182 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
     if (!mounted) return;
     setState(() {
       activeTripId = null;
+      tripStage = 'canceled';
       tripStatusText = 'تم إلغاء الرحلة';
+      boardingPromptShown = false;
     });
 
     _snack("تم الإلغاء");
+  }
+
+  // ---------------- Boarding prompt (250m) ----------------
+  void _maybePromptBoarding() {
+    if (activeTripId == null) return;
+    if (tripStage != 'waiting_driver') return;
+    if (pickup == null) return;
+    if (driverPoints.isEmpty) return;
+
+    if (boardingPromptShown) return;
+
+    final now = DateTime.now();
+    if (lastBoardingPromptAt != null) {
+      if (now.difference(lastBoardingPromptAt!).inSeconds < 30) return;
+    }
+
+    double best = double.infinity;
+    for (final d in driverPoints) {
+      final m = _dist.as(LengthUnit.Meter, pickup!, d);
+      if (m < best) best = m;
+    }
+
+    if (best <= arrivalMeters) {
+      boardingPromptShown = true;
+      lastBoardingPromptAt = now;
+      _showBoardingDialog(best);
+    }
+  }
+
+  Future<void> _showBoardingDialog(double meters) async {
+    if (!mounted) return;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('عربة قريبة'),
+        content: Text(
+          'في عربة قربت حوالي ${meters.toStringAsFixed(0)} متر.\nهل ركبت؟',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('لا'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('نعم'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true) {
+      boardingPromptShown = false; // يسمح تظهر لاحقاً
+      return;
+    }
+
+    await _markBoardedAndPay();
+  }
+
+  Future<void> _markBoardedAndPay() async {
+    final tripId = activeTripId;
+    if (tripId == null) return;
+
+    await FirebaseFirestore.instance
+        .collection('trip_requests')
+        .doc(tripId)
+        .set({
+          'status': 'boarded_pending_payment',
+          'boardedAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+
+    if (!mounted) return;
+    setState(() {
+      tripStage = 'boarded_pending_payment';
+      tripStatusText = 'تم الركوب • اختر طريقة الدفع';
+    });
+
+    await _showPaymentSheet();
+  }
+
+  Future<void> _showPaymentSheet() async {
+    final tripId = activeTripId;
+    if (tripId == null) return;
+
+    final amount = (tripCost ?? 0);
+
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'اختر طريقة الدفع',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 10),
+            Text('المبلغ: ${amount.toStringAsFixed(0)}'),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                icon: const Icon(Icons.payments_outlined),
+                label: const Text('كاش'),
+                onPressed: () => Navigator.pop(context, 'cash'),
+              ),
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.account_balance_wallet_outlined),
+                label: const Text('المحفظة'),
+                onPressed: () => Navigator.pop(context, 'wallet'),
+              ),
+            ),
+            const SizedBox(height: 6),
+          ],
+        ),
+      ),
+    );
+
+    if (choice == null) return;
+
+    if (choice == 'cash') {
+      await FirebaseFirestore.instance
+          .collection('trip_requests')
+          .doc(tripId)
+          .set({
+            'paymentMethod': 'cash',
+            'paymentStatus': 'cash',
+            'status': 'in_trip',
+            'paidAt': FieldValue.serverTimestamp(),
+          }, SetOptions(merge: true));
+
+      if (!mounted) return;
+      setState(() {
+        tripStage = 'in_trip';
+        tripStatusText = 'تم اختيار الدفع كاش • في الرحلة';
+      });
+      return;
+    }
+
+    if (choice == 'wallet') {
+      try {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid == null) throw Exception('Not signed in');
+
+        await WalletService.payTripWithWallet(
+          uid: uid,
+          tripId: tripId,
+          amount: amount,
+        );
+
+        if (!mounted) return;
+        setState(() {
+          tripStage = 'in_trip';
+          tripStatusText = 'تم الدفع بالمحفظة ✅ • في الرحلة';
+        });
+      } catch (e) {
+        boardingPromptShown = false; // يسمح بمحاولة ثانية
+        if (!mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('فشل الدفع بالمحفظة: $e')));
+      }
+    }
   }
 
   Future<void> _useMyLocationAsPickup() async {
@@ -535,7 +726,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
     return Scaffold(
       body: Stack(
         children: [
-          // MAP
           FlutterMap(
             mapController: mapController,
             options: MapOptions(
@@ -548,7 +738,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                 urlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
                 userAgentPackageName: "com.example.project1",
               ),
-
               if (routePoints.isNotEmpty)
                 PolylineLayer(
                   polylines: [
@@ -565,10 +754,8 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                       ),
                   ],
                 ),
-
               MarkerLayer(
                 markers: [
-                  // drivers
                   ...driverPoints.map(
                     (p) => Marker(
                       point: p,
@@ -577,8 +764,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                       child: const Icon(Icons.directions_car, size: 34),
                     ),
                   ),
-
-                  // route start/end
                   if (routeStart != null)
                     Marker(
                       point: routeStart!,
@@ -593,8 +778,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                       height: 40,
                       child: const Icon(Icons.flag, size: 30),
                     ),
-
-                  // passenger
                   if (pickup != null)
                     Marker(
                       point: pickup!,
@@ -614,7 +797,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
             ],
           ),
 
-          // Bottom Sheet
           DraggableScrollableSheet(
             minChildSize: 0.16,
             initialChildSize: 0.22,
@@ -668,8 +850,10 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                                 tripCost = null;
                                 driverPoints = [];
                                 activeTripId = null;
+                                tripStage = 'none';
                                 tripStatusText = 'لم يتم تأكيد رحلة بعد';
                                 pickingPickup = false;
+                                boardingPromptShown = false;
                               });
                             },
                             child: const Text("تغيير"),
@@ -691,7 +875,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                       const SizedBox(height: 16),
                     ],
 
-                    // ✅ اختيار مسار داخل نفس الصفحة (بدون انتقال)
                     if (routeId == null) ...[
                       const Text(
                         "المسارات المتاحة",
@@ -708,7 +891,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                       ),
                       const SizedBox(height: 80),
                     ] else ...[
-                      // Route selected summary
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
@@ -737,7 +919,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
 
                       const SizedBox(height: 12),
 
-                      // Trip status (بديل زر المحفظة داخل الشيت)
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
@@ -762,6 +943,11 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
                                 ),
                               ),
                             ),
+                            if (tripStage == 'boarded_pending_payment')
+                              OutlinedButton(
+                                onPressed: _showPaymentSheet,
+                                child: const Text("الدفع"),
+                              ),
                             if (activeTripId != null) ...[
                               const SizedBox(width: 8),
                               OutlinedButton(
@@ -775,7 +961,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
 
                       const SizedBox(height: 12),
 
-                      // Actions
                       Row(
                         children: [
                           Expanded(
@@ -812,7 +997,6 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
 
                       const SizedBox(height: 12),
 
-                      // Cost + confirm
                       Container(
                         padding: const EdgeInsets.all(14),
                         decoration: BoxDecoration(
@@ -868,14 +1052,13 @@ class _PassengerJourneyPageState extends State<PassengerJourneyPage> {
   }
 }
 
-/// ✅ قائمة المسارات داخل BottomSheet (بدون Navigation)
 class _RoutesInlineList extends StatelessWidget {
   final void Function(String routeId) onPickRoute;
   const _RoutesInlineList({required this.onPickRoute});
 
   @override
   Widget build(BuildContext context) {
-    // ⚠️ يحتاج Composite Index: routes(active ASC, createdAt DESC)
+    // ⚠️ يحتاج Index: routes(active ASC, createdAt DESC)
     final q = FirebaseFirestore.instance
         .collection('routes')
         .where('active', isEqualTo: true)
